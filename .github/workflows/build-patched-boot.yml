@@ -1,0 +1,88 @@
+name: Patch boot images
+
+# One click: Actions tab -> "Patch boot images" -> Run workflow.
+# Images come from (1) the release tag typed in below (every *.img asset on it is patched, so
+# boot.img from a custom ROM, boot_a.img, boot_b.img ... all work), or (2) the input/ folder. Patched images come back as the
+# "patched-boot-images" artifact (and optionally a prerelease).
+on:
+  workflow_dispatch:
+    inputs:
+      input_release:
+        description: "Release tag whose *.img assets should be patched (blank = use files in input/)"
+        type: string
+        required: false
+        default: ""
+      publish_release:
+        description: "Also publish the patched images as a GitHub prerelease"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "input/**"
+      - "build.py"
+      - "tools/**"
+      - "ci/**"
+      - ".github/workflows/build-patched-boot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get input images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RELEASE: ${{ inputs.input_release }}
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          if [[ -n "$INPUT_RELEASE" ]]; then
+            gh release download "$INPUT_RELEASE" --repo "$GITHUB_REPOSITORY" \
+              --pattern '*.img' --dir input --clobber
+          fi
+          shopt -s nullglob
+          imgs=(input/*.img)
+          if (( ${#imgs[@]} == 0 )); then
+            echo "::error::No images found. Put boot_a.img / boot_b.img in input/, or give a release tag that has them as assets."
+            exit 1
+          fi
+          ls -l "${imgs[@]}"
+
+      - name: Fetch pinned magiskboot
+        run: tools/fetch_magiskboot.sh
+
+      - name: Patch, repack and verify
+        run: python3 build.py input/*.img
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: patched-boot-images
+          if-no-files-found: warn
+          retention-days: 30
+          path: output/
+
+  release:
+    needs: patch
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-boot-images
+          path: output/
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "patched-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}" output/* \
+            --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "Patched boot images (run ${GITHUB_RUN_NUMBER})" \
+            --notes "Built from commit ${GITHUB_SHA}. Hardware tested: NO. Experimental - keep a backup of the originals."

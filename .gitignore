@@ -1,0 +1,6 @@
+.env
+# generated / downloaded - never commit
+.ci-tools/
+work/
+output/
+__pycache__/
