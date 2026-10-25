@@ -54,7 +54,7 @@ jobs:
           ls -l "${imgs[@]}"
 
       - name: Fetch pinned magiskboot
-        run: tools/fetch_magiskboot.sh
+        run: bash tools/fetch_magiskboot.sh
 
       - name: Patch, repack and verify
         run: python3 build.py input/*.img
