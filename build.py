@@ -4,13 +4,15 @@
     python3 build.py input/boot_a.img input/boot_b.img        # what CI runs
     python3 build.py input/boot_a.img --dry-run                # only look for the patch sites
     python3 build.py a.img --magiskboot /path/to/magiskboot --out out/
+    python3 build.py input/boot_a.img --force-patch '[{"image":"boot_a.img","offsets":[0x178628,0x1786cc]}]'
 
 For EACH image (processed independently; one image failing never hides another's result):
   1. magiskboot unpack
-  2. locate the MTK bounds-check using the upstream mtk-bpf-patcher signatures (1..MAX_HITS
-     matches, each must decode as `cbnz w8, <label>`) and replace each cbnz with a NOP.
-     No match is reported as "no match", never guessed: the kernel is either not affected
-     or compiled in a shape these signatures do not cover.
+  2. (default) locate the MTK bounds-check using the upstream mtk-bpf-patcher signatures
+     (1..MAX_HITS matches, each must decode as `cbnz w8, <label>`) and replace each cbnz
+     with a NOP. No match is reported as "no match", never guessed.
+     OR (--force-patch) skip signatures, patch only the offsets you specify. Use for testing
+     or when the kernel is compiled in a shape the signatures don't cover.
   3. independent diff check: only the expected 4-byte windows changed, each is a NOP
   4. magiskboot repack, unpack the result again, confirm the patched kernel survived and
      every other component is byte-identical to the original
@@ -131,7 +133,7 @@ def magiskboot(exe, *args, cwd):
         raise BuildError(f"magiskboot {' '.join(map(str, args))} failed ({r.returncode}): {tail}")
 
 
-def process(image, mb, out, dry_run):
+def process(image, mb, out, dry_run, forced_offsets=None):
     data = image.read_bytes()
     result = {"image": image.name, "input_sha256": sha256(data), "input_size": len(data)}
     with tempfile.TemporaryDirectory() as tmp:
@@ -149,12 +151,14 @@ def process(image, mb, out, dry_run):
         if m >= 0:
             result["kernel_version"] = orig_kernel[m + 14:m + 80].split(b" ")[0].decode(errors="replace")
 
-        try:
+        if forced_offsets is not None:
+            offsets = forced_offsets
+            sites = [(f"forced-0x{off:x}", off) for off in offsets]
+            print(f"[*] force-patch mode: patching {len(offsets)} offset(s)")
+        else:
             sites = find_sites(orig_kernel)
-        except NoMatch as e:
-            e.kernel_version = result.get("kernel_version")
-            raise
-        offsets = [off for _, off in sites]
+            offsets = [off for _, off in sites]
+        
         patched = bytearray(orig_kernel)
         for off in offsets:
             patched[off:off + 4] = NOP
@@ -213,14 +217,27 @@ def main():
     ap.add_argument("images", nargs="+", type=Path, help="boot images to patch (e.g. boot_a.img boot_b.img)")
     ap.add_argument("--magiskboot", type=Path, default=ROOT / ".ci-tools" / "magiskboot")
     ap.add_argument("--out", type=Path, default=ROOT / "output")
+    ap.add_argument("--force-patch", help='JSON: [{"image":"name.img", "offsets":[0x..., 0x...]}]. Skip signature check, patch only these.')
     ap.add_argument("--dry-run", action="store_true", help="look for the patch sites, write nothing")
     args = ap.parse_args()
 
     if not args.magiskboot.is_file():
-        sys.exit(f"[!] magiskboot not found: {args.magiskboot} (run tools/fetch_magiskboot.sh)")
+        sys.exit(f"[!] magiskboot not found: {args.magiskboot} (run bash tools/fetch_magiskboot.sh)")
     stems = [p.stem for p in args.images]
     if len(set(stems)) != len(stems):
         sys.exit("[!] two input images have the same file name; rename one")
+    
+    forced = {}
+    if args.force_patch:
+        try:
+            forced_list = json.loads(args.force_patch)
+            forced = {f["image"]: f["offsets"] for f in forced_list}
+            for img in args.images:
+                if img.name not in forced:
+                    sys.exit(f"[!] --force-patch given but {img.name} not listed (have: {set(forced.keys())})")
+        except Exception as e:
+            sys.exit(f"[!] --force-patch JSON parse failed: {e}")
+
     args.out.mkdir(parents=True, exist_ok=True)
 
     results = []
@@ -229,11 +246,10 @@ def main():
         try:
             if not image.is_file():
                 raise BuildError("file not found")
-            r = process(image, args.magiskboot.resolve(), args.out, args.dry_run)
+            forced_off = forced.get(image.name)
+            r = process(image, args.magiskboot.resolve(), args.out, args.dry_run, forced_off)
         except NoMatch as e:
             r = {"image": image.name, "status": "no match", "detail": str(e)}
-            if getattr(e, "kernel_version", None):
-                r["kernel_version"] = e.kernel_version
             if IN_ACTIONS:
                 print(f"::warning title={image.name}::{e}")
         except BuildError as e:

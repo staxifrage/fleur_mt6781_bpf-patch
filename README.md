@@ -9,32 +9,29 @@ The dump was taken with [`mtkclient`](https://github.com/bkerler/mtkclient) (BRO
 
 ## Status - read before flashing
 
-**Hardware tested: no. And for the shipped `boot_a` kernel there is currently nothing to patch.**
+**Hardware tested: no. None of the three kernels analysed so far contains the bug this repo targets.**
 
-- The 4.19.325-cip129-st13 kernel in `boot_a` and `boot_b` (identical) has no MediaTek
-  check in `array_map_update_elem()` (`0x179bc4`) or `array_map_lookup_elem()` (`0x179b90`):
-  no `cbnz` after the index/`mul` math, no NOP where one was, and neither upstream
-  `mtk-bpf-patcher` signature occurs anywhere in the image. `boot.img` (stock 4.19.191)
-  does not contain them either. The kernel is therefore either unaffected or compiled in a
-  shape these signatures do not cover.
-- The previous version of this repo patched two `tbz` branches at `0x178628` / `0x1786cc`.
-  Those are in a different function (`0x178080`: six arguments, `0x120` frame, writes
-  `LIST_POISON2`), and they never matched the upstream pattern (`cbnz w8` that skips the
-  memcpy). **Treat them as wrong.** They were also written as `d5 03 20 1f`, which is not a
-  NOP on a little-endian image (it decodes as `fnmadd s21, s30, s0, s0`; a NOP is
-  `1f 20 03 d5`). Do not flash anything built before this change (`output/`, `bpf-test-*`
-  prereleases).
+I disassembled `array_map_update_elem()` and `array_map_lookup_elem()` in each of them:
 
-`build.py` now uses the upstream signatures and **aborts if none match**. To decide whether
-your device is affected at all, run the acceptance test on the stock kernel as root:
+| kernel | `array_map_update_elem` | result |
+|---|---|---|
+| `4.19.191` (stock MIUI `boot.img`) | `0x15f6b8` | clean: flags / `-E2BIG` / `-EEXIST` / per-CPU / `(index & mask) * elem_size` + `memcpy`, no extra guard |
+| `4.19.325-cip129-st13` (`boot_a`/`boot_b`) | `0x179bc4` | clean, same shape (plus BPF_F_LOCK handling) |
+| `4.19.325-Fleux-V4+` (Infinity X 4.0 `boot_a`/`boot_b`, identical) | `0x176244` | clean, same shape |
 
-```
-clang -O2 -o bpf_array_test research/bpf_array_test.c && su -c ./bpf_array_test
-```
+Neither upstream `mtk-bpf-patcher` signature occurs in any of them, and all three have
+`BPF_SYSCALL`, `BPF_JIT`, `CGROUP_BPF`, `NETFILTER_XT_MATCH_BPF`, `NET_CLS_BPF` and `XFRM_INTERFACE`
+enabled (read from the embedded kernel config). So the arraymap/ubsan bug is not what is
+breaking networking on these builds, and `build.py` correctly reports "no match".
 
-`BUG PRESENT` (index 0 ok, 1..3 dropped or `EINVAL`) means the kernel is affected and the
-signatures need extending for this build; `OK` means the no-internet problem has another cause.
-After any patch is flashed the same test must print `OK`.
+The previous version of this repo patched two `tbz` branches at `0x178628` / `0x1786cc` of the
+`cip129` kernel. Those are in an unrelated function (`0x178080`) and were also written as
+`d5 03 20 1f`, which is not a NOP on a little-endian image (it decodes as
+`fnmadd s21, s30, s0, s0`; a NOP is `1f 20 03 d5`). Do not flash anything built before this change.
+
+To find the real cause on the device, as root: run `research/bpf_array_test.c` (array maps),
+and capture `logcat -b all | grep -iE "netd|bpf|netbpfload|tethering"` and `dmesg | grep -i bpf`
+right after boot.
 
 ## One-click patching with GitHub Actions
 
@@ -56,7 +53,7 @@ guess-and-patch: it means the kernel contains none of the known signatures (see 
 Locally (Linux x86_64; elsewhere pass your own binary with `--magiskboot PATH`):
 
 ```
-tools/fetch_magiskboot.sh                          # pinned official Magisk APK -> .ci-tools/
+bash tools/fetch_magiskboot.sh                     # pinned official Magisk APK -> .ci-tools/
 python3 build.py input/boot_a.img input/boot_b.img   # -> output/*-bpf-patched.img
 python3 build.py input/boot_a.img --dry-run          # only look for the patch sites
 ```

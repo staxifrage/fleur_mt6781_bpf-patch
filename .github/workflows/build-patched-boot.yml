@@ -1,14 +1,19 @@
 name: Patch boot images
 
 # One click: Actions tab -> "Patch boot images" -> Run workflow.
-# Images come from (1) the release tag typed in below (every *.img asset on it is patched, so
-# boot.img from a custom ROM, boot_a.img, boot_b.img ... all work), or (2) the input/ folder. Patched images come back as the
-# "patched-boot-images" artifact (and optionally a prerelease).
+# Images come from (1) the release tag typed in below (every *.img asset on it is patched), or (2) the input/ folder.
+# Optionally supply force_patch_json to skip signature matching and patch at specified offsets.
+# Patched images come back as the "patched-boot-images" artifact (and optionally a prerelease).
 on:
   workflow_dispatch:
     inputs:
       input_release:
         description: "Release tag whose *.img assets should be patched (blank = use files in input/)"
+        type: string
+        required: false
+        default: ""
+      force_patch_json:
+        description: 'JSON: [{"image":"boot_a.img","offsets":[0x178628,0x1786cc]}]. Skip signatures, patch only these.'
         type: string
         required: false
         default: ""
@@ -48,7 +53,7 @@ jobs:
           shopt -s nullglob
           imgs=(input/*.img)
           if (( ${#imgs[@]} == 0 )); then
-            echo "::error::No images found. Put boot_a.img / boot_b.img in input/, or give a release tag that has them as assets."
+            echo "::error::No images found. Put *.img in input/, or give a release tag that has them as assets."
             exit 1
           fi
           ls -l "${imgs[@]}"
@@ -57,7 +62,14 @@ jobs:
         run: bash tools/fetch_magiskboot.sh
 
       - name: Patch, repack and verify
-        run: python3 build.py input/*.img
+        env:
+          FORCE_PATCH: ${{ inputs.force_patch_json }}
+        run: |
+          if [[ -n "$FORCE_PATCH" ]]; then
+            python3 build.py input/*.img --force-patch "$FORCE_PATCH"
+          else
+            python3 build.py input/*.img
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
